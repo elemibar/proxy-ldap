@@ -22,7 +22,7 @@ func main() {
 	fmt.Print("Backend conectado.\n")
 
 	fmt.Println("Sirviendo backend")
-	err = srv.Serve("tcp", "10.1.5.45:389")
+	err = srv.Serve("tcp", "127.0.0.1:389")
 	if err != nil {
 		fmt.Println("No se pudo servir el backend")
 		log.Fatalln(err)
