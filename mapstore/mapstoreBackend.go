@@ -40,13 +40,17 @@ func (mapstoreBackend) Add(ctx context.Context, state State, req *AddRequest) (*
 func (mapstoreBackend) Bind(ctx context.Context, state State, req *BindRequest) (*BindResponse, error) {
 
 	log.Printf("BIND req => %+v\n", req)
+	// Se extrae el usuario para las validaciones
 	usr, err := extractUsername(req.DN)
+	// Si el usuario es admin
 	if usr == "admin" {
+		// Se obtiene la pass del archivo de configuraciones
 		pas, err := obtenerPassAdmin()
 		if err != nil {
 			return nil, err
 		}
-
+		// Se compara la pass, si es correcta se retorna una respuesta LDAP BindResponse Success
+		// si no retorna error
 		if string(req.Password) == pas {
 			return &BindResponse{
 				BaseResponse: BaseResponse{
@@ -60,7 +64,8 @@ func (mapstoreBackend) Bind(ctx context.Context, state State, req *BindRequest) 
 		}
 	}
 
-	c, err := Dial("tcp", servLdap)
+	// Si no es admin se envia la consulta al servidor LDAP
+	c, err := Dial("tcp", ldapIC)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +83,7 @@ func (mapstoreBackend) Bind(ctx context.Context, state State, req *BindRequest) 
 	if err := c.Bind(usrDN, req.Password); err != nil {
 		return nil, err
 	}
-
+	// Si el Bind es correcto se retorna una respuesta LDAP BindResponse Success
 	return &BindResponse{
 		BaseResponse: BaseResponse{
 			Code:      ResultSuccess,
@@ -131,12 +136,13 @@ func (mapstoreBackend) Search(ctx context.Context, state State, req *SearchReque
 	log.Printf("SEARCH req => %+v\n", req)
 
 	//////////////
-
+	// Se evalua la request para saber si hay que enviarla a la BD o a LDAP
 	res, err := forwardSearch(req)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	// DEBUG, imprime la respuesta
 	for i, _ := range res {
 		//fmt.Println("DEBUG SEARCH result => ")
 		res[i].ToLDIF(os.Stdout)
@@ -161,14 +167,16 @@ func (mapstoreBackend) Whoami(ctx context.Context, state State) (string, error) 
 	return "cn=someone,o=somewhere", nil
 }
 
+////////// De aca en adelante son funciones
+
 // Se consulta si hay que reenviar la consulta a la BD o LDAP
 func forwardSearch(req *SearchRequest) ([]*SearchResult, error) {
 
 	log.Printf("FORWARD SEARCH req => %+v\n", req)
-	sqlReq := false
-	debugDB := false // Bandera para activar o desactivar la BD
-	sqlQuery := ""
-	groupsQuery := false
+	sqlReq := false      // Bandera que determina si la consulta hay que enviarla a la BD o LDAP
+	debugDB := false     // Bandera para activar o desactivar la BD (manual)
+	sqlQuery := ""       // Variable para los casos en los que sea necesario consultar la BD, se guarda la query en ella
+	groupsQuery := false // Bandera para validar si la consulta es de grupos (para agregarle el DN a cada respuesta)
 
 	//fmt.Printf("DEBUG FORWARDSEARCH filter => %v\n", req.Filter.String())
 
@@ -214,9 +222,9 @@ func forwardSearch(req *SearchRequest) ([]*SearchResult, error) {
 		//fmt.Println("DEBUG FORWARDSEARCH filter repaired => " + newFilter.String())
 	}
 
-	// Consultas a la DB
+	// Consultas a la DB, si debugDB es false no se consulta la BD (bandera manual)
 	if sqlReq && debugDB {
-		// Query a la base
+
 		psqlInfo := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", pgHost, pgPort, pgUser, pgPass, pgDbName)
 		DB, err := sql.Open("postgres", psqlInfo)
 		if err != nil {
@@ -234,7 +242,7 @@ func forwardSearch(req *SearchRequest) ([]*SearchResult, error) {
 			return nil, err
 		}
 
-		// Si la consulta fue de grupos se le agrega al DN a la respuesta
+		// Si la consulta fue de grupos se le agrega el DN a la respuesta
 		if groupsQuery {
 			for i, res := range rets {
 				rets[i].DN = strings.Replace(strings.Replace(fmt.Sprintf("cn=%s,ou=Groups,dc=imcanelones,dc=gub,dc=uy", res.Attributes["cn"]), "[", "", -1), "]", "", -1)
@@ -270,6 +278,7 @@ func forwardSearch(req *SearchRequest) ([]*SearchResult, error) {
 
 }
 
+// Consulta el servidor LDAP(10.1.1.25) para obtener el DN completo del usuario (creo que es el objetivo de Whoami)
 func getUserDn(ctx context.Context, state State, bReq *BindRequest) (string, error) {
 	log.Printf("GET USER DN req => %v", bReq)
 	var sReq SearchRequest
@@ -310,7 +319,7 @@ func getUserDn(ctx context.Context, state State, bReq *BindRequest) (string, err
 		for _, r := range res {
 			buf := new(bytes.Buffer)
 			//fmt.Println("\nResult Print: ")
-			//fmt.Printf("%+v\n", r) //con %c imprime los caracteres pero con espacios, tengo que ver bien eso para obtener el campo c[omo corresponde]
+			//fmt.Printf("%+v\n", r)
 			r.ToLDIF(buf)
 			fmt.Printf("DEBUG GET USER DN => ")
 			r.ToLDIF(os.Stdout)
@@ -329,6 +338,8 @@ func getUserDn(ctx context.Context, state State, bReq *BindRequest) (string, err
 	return ret, nil
 }
 
+// Extrae el usuario de los DN
+// Precondiciones: El usuario debe estar entre "uid=" o "uid\3d" y "," o ")"
 func extractUsername(str string) (string, error) {
 
 	log.Printf("EXTRACT USERNAME str => %v\n", str)
@@ -381,56 +392,7 @@ func extractUsername(str string) (string, error) {
 	return str[s:e], nil
 }
 
-/*
-func sqlRToldapResult(rows *sql.Rows) ([]*SearchResult, error) {
-
-		cols, _ := rows.Columns()
-
-		m := make(map[string]interface{})
-		attrMap := make(map[string][][]byte)
-
-		for rows.Next() {
-
-			columns := make([]interface{}, len(cols))
-
-			columnPointers := make([]interface{}, len(cols))
-
-			for i, _ := range columns {
-				columnPointers[i] = &columns[i]
-			}
-
-			if err := rows.Scan(columnPointers...); err != nil {
-				return nil, err
-			}
-
-			for i, colName := range cols {
-				val := columnPointers[i].(*interface{})
-				m[colName] = *val
-				attrMap[colName] = append(attrMap[colName], []byte(fmt.Sprint(m[colName])))
-			}
-
-		}
-
-		//fmt.Println("DEBUG SQLTOLDAP row => ")
-		fmt.Println(attrMap)
-
-		var newSR *SearchResult
-		newSR = new(SearchResult)
-		newSR.Attributes = attrMap
-
-		var ret []*SearchResult
-
-		//fmt.Println("DEBUG SQLTOLDAP newSR => ")
-		newSR.ToLDIF(os.Stdout)
-
-		ret = append(ret, newSR)
-
-		//fmt.Printf("DEBUG SQLTOLDAP ret => %v\n", ret)
-		//fmt.Printf("DEBUG SQLTOLDAP ret[0].Attributes => %v\n", ret[0].Attributes)
-
-		return ret, nil
-	}
-*/
+// Transforma los resultados de las query de la base a respuestas LDAP
 func sqlRToldapResult(rows *sql.Rows) ([]*SearchResult, error) {
 
 	var ret []*SearchResult
@@ -474,6 +436,7 @@ func sqlRToldapResult(rows *sql.Rows) ([]*SearchResult, error) {
 	return ret, nil
 }
 
+// Obtiene la pass de Admin del archivo de contrasenias
 func obtenerPassAdmin() (string, error) {
 
 	dat, err := os.ReadFile("/root/.pgpass")
