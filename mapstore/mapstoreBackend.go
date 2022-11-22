@@ -11,6 +11,7 @@ import (
 	"os"
 	. "proxyldap/ldap"
 	"strings"
+	"syscall"
 
 	_ "github.com/lib/pq"
 )
@@ -20,7 +21,9 @@ type mapstoreBackend struct{}
 var MapstoreBackend Backend = mapstoreBackend{}
 
 var ldapIC = "10.1.1.25:389"
-var proxyLdappy = "127.0.0.1:10389"
+
+var proxyLdappy = "127.0.0.1:10389" // Cambiar para apuntar al proxy LDAP python
+//var proxyLdappy = "10.1.5.8:389" // Cambiar para apuntar al proxy LDAP python
 
 var servLdap = proxyLdappy
 
@@ -51,6 +54,8 @@ func (mapstoreBackend) Bind(ctx context.Context, state State, req *BindRequest) 
 		}
 		// Se compara la pass, si es correcta se retorna una respuesta LDAP BindResponse Success
 		// si no retorna error
+		log.Printf("Comparacion de passes pas %v == req.pas %v", pas, string(req.Password))
+
 		if string(req.Password) == pas {
 			return &BindResponse{
 				BaseResponse: BaseResponse{
@@ -69,6 +74,8 @@ func (mapstoreBackend) Bind(ctx context.Context, state State, req *BindRequest) 
 	if err != nil {
 		return nil, err
 	}
+
+	defer c.Close()
 
 	////////////////
 	/* Antes del bind encontrar DN */
@@ -172,7 +179,6 @@ func (mapstoreBackend) Whoami(ctx context.Context, state State) (string, error) 
 // Se consulta si hay que reenviar la consulta a la BD o LDAP
 func forwardSearch(req *SearchRequest) ([]*SearchResult, error) {
 
-	log.Printf("FORWARD SEARCH req => %+v\n", req)
 	sqlReq := false      // Bandera que determina si la consulta hay que enviarla a la BD o LDAP
 	debugDB := false     // Bandera para activar o desactivar la BD (manual)
 	sqlQuery := ""       // Variable para los casos en los que sea necesario consultar la BD, se guarda la query en ella
@@ -258,11 +264,22 @@ func forwardSearch(req *SearchRequest) ([]*SearchResult, error) {
 			log.Fatal(err)
 		}
 
-		res, err := c.Search(req)
+		defer c.Close()
 
+		//req.Scope = ScopeBaseObject
+		//req.DerefAliases = NeverDerefAliases
+
+		log.Printf("FORWARD SEARCH req => %+v\n", req)
+
+		res, err := c.Search(req)
 		if err != nil {
-			log.Fatal(err)
-		} else {
+			if errors.Is(err, syscall.ECONNRESET) {
+				log.Print("This is connection reset by peer error")
+			} else {
+				log.Fatal(err)
+			}
+
+		} /*else {
 			for _, r := range res {
 
 				log.Printf("FORWARD SEARCH result => ")
@@ -271,7 +288,7 @@ func forwardSearch(req *SearchRequest) ([]*SearchResult, error) {
 
 			}
 
-		}
+		}*/
 
 		return res, nil
 	}
@@ -286,6 +303,8 @@ func getUserDn(ctx context.Context, state State, bReq *BindRequest) (string, err
 	sReq.BaseDN = "ou=Users,dc=imcanelones,dc=gub,dc=uy"
 	sReq.Scope = ScopeWholeSubtree
 	sReq.DerefAliases = DerefAlways
+	//sReq.Scope = 1
+	//sReq.DerefAliases = 0
 	sReq.SizeLimit = 0
 	sReq.TimeLimit = 0
 	sReq.TypesOnly = false
@@ -310,6 +329,8 @@ func getUserDn(ctx context.Context, state State, bReq *BindRequest) (string, err
 	if err != nil {
 		return "", err
 	}
+
+	defer c.Close()
 
 	res, err := c.Search(&sReq)
 	ret := ""
@@ -459,7 +480,7 @@ func obtenerPassAdmin() (string, error) {
 		return "", errors.New("OBTENER ADMIN PASS => No se pudo leer el archivo")
 	}
 
-	e += s
+	// e += s
 
 	return string(dat[s:e]), nil
 
