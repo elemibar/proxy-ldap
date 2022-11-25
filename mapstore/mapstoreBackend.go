@@ -54,7 +54,7 @@ func (mapstoreBackend) Bind(ctx context.Context, state State, req *BindRequest) 
 		}
 		// Se compara la pass, si es correcta se retorna una respuesta LDAP BindResponse Success
 		// si no retorna error
-		log.Printf("Comparacion de passes pas %v == req.pas %v", pas, string(req.Password))
+		//log.Printf("Comparacion de passes pas %v == req.pas %v", pas, string(req.Password))
 
 		if string(req.Password) == pas {
 			return &BindResponse{
